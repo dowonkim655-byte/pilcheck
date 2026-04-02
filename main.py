@@ -148,6 +148,30 @@ def kakao_simple(text: str) -> dict:
     }
 
 
+def kakao_guide() -> dict:
+    """성분 미입력 또는 1개 입력 시 안내 + 버튼 응답."""
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [
+                {
+                    "basicCard": {
+                        "title": "💊 필체크 사용방법",
+                        "description": "복용 중인 영양제 성분을 콤마(,)로 구분해서 입력해주세요!\n\n예) 마그네슘, 칼슘, 비타민D, 오메가3",
+                        "buttons": [
+                            {
+                                "action": "message",
+                                "label": "예시로 체크해보기",
+                                "messageText": "마그네슘, 칼슘, 비타민D, 오메가3",
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # 엔드포인트
 # ---------------------------------------------------------------------------
@@ -163,17 +187,12 @@ async def kakao_webhook(request: Request):
     logger.info(f"입력: {utterance!r}")
 
     if not utterance:
-        return JSONResponse(kakao_simple("성분명을 입력해주세요.\n예시: 마그네슘, 칼슘, 비타민D"))
+        return JSONResponse(kakao_guide())
 
     ingredients = parse_ingredients(utterance)
 
     if len(ingredients) < 2:
-        msg = (
-            f"'{ingredients[0]}' 성분을 인식했습니다.\n"
-            "상호작용 확인을 위해 성분을 2개 이상 입력해주세요.\n"
-            "예시: 마그네슘, 칼슘, 비타민D"
-        ) if ingredients else "성분을 인식하지 못했습니다. 다시 입력해주세요."
-        return JSONResponse(kakao_simple(msg))
+        return JSONResponse(kakao_guide())
 
     results = check_interactions(ingredients)
     return JSONResponse(build_kakao_response(ingredients, results))
