@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="필체크 - 건강기능식품 성분 상호작용 체커")
 
 # ---------------------------------------------------------------------------
-# 구글 시트 URL (공개 공유 설정 필요)
+# 구글 시트 URL (상호작용 DB)
 # ---------------------------------------------------------------------------
 SHEETS_INTERACTION_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -36,7 +36,8 @@ ALIASES: dict[str, str] = {
     "비타민 b2": "비타민B2", "비타민b2": "비타민B2", "b2": "비타민B2", "riboflavin": "비타민B2",
     "비타민 b3": "비타민B3", "비타민b3": "비타민B3", "b3": "비타민B3", "niacin": "비타민B3",
     "비타민 b5": "비타민B5", "비타민b5": "비타민B5", "b5": "비타민B5",
-    "비타민 b7": "비타민B7", "비타민b7": "비타민B7", "b7": "비타민B7", "biotin": "비타민B7", "비오틴": "비타민B7",
+    "비타민 b7": "비타민B7", "비타민b7": "비타민B7", "b7": "비타민B7", "biotin": "비타민B7",
+    "비오틴": "비타민B7",
     "비타민 e": "비타민E", "비타민e": "비타민E", "vit e": "비타민E",
     # 무기질
     "오메가-3": "오메가3", "omega3": "오메가3", "omega-3": "오메가3", "dha": "오메가3", "epa": "오메가3",
@@ -80,13 +81,66 @@ ALIASES: dict[str, str] = {
     "알로에": "알로에", "aloe": "알로에",
 }
 
+# 식품중분류명 → 표준 성분명 매핑
+NUTRI_CATEGORY_MAP: dict[str, str] = {
+    "EPA 및 DHA 함유 유지": "오메가3",
+    "식물성오메가-3지방산": "오메가3",
+    "필수지방산": "오메가3",
+    "마그네슘": "마그네슘",
+    "루테인": "루테인",
+    "루테인/루테인지아잔틴": "루테인",
+    "밀크씨슬 추출물": "밀크씨슬",
+    "비타민 A": "비타민A",
+    "비타민 B1": "비타민B1",
+    "비타민 B12": "비타민B12",
+    "비타민 B2": "비타민B2",
+    "비타민 B6": "비타민B6",
+    "비타민 C": "비타민C",
+    "비타민 D": "비타민D",
+    "비타민 E": "비타민E",
+    "비타민K": "비타민K",
+    "비오틴": "비타민B7",
+    "아연": "아연",
+    "인삼": "인삼",
+    "철": "철분",
+    "칼슘": "칼슘",
+    "코엔자임Q10": "코엔자임Q10",
+    "크롬": "크롬",
+    "클로렐라": "클로렐라",
+    "스피루리나": "스피루리나",
+    "프로바이오틱스": "프로바이오틱스",
+    "프로바이오틱스/복합프로바이오틱스": "프로바이오틱스",
+    "홍삼": "홍삼",
+    "글루코사민": "글루코사민",
+    "가르시니아캄보지아 추출물": "가르시니아",
+    "히알루론산": "히알루론산",
+    "NAG": "글루코사민",
+    "은행잎 추출물": "은행잎추출물",
+    "녹차 추출물": "녹차추출물",
+    "강황 추출물": "커큐민",
+    "테아닌": "테아닌",
+    "카르니틴": "카르니틴",
+    "키토산/키토올리고당": "키토산",
+}
+
+# 영양성분 컬럼 → 표준 성분명 (복합제품에서 실제 함량 추출용)
+NUTRI_COL_MAP: dict[str, str] = {
+    "칼슘(mg)": "칼슘",
+    "철(mg)": "철분",
+    "비타민 A(μg RAE)": "비타민A",
+    "티아민(mg)": "비타민B1",
+    "리보플라빈(mg)": "비타민B2",
+    "니아신(mg)": "비타민B3",
+    "비타민 C(mg)": "비타민C",
+    "비타민 D(μg)": "비타민D",
+}
+
 LEVEL_EMOJI = {
     "warning": "🔴 경고",
     "caution":  "🟡 주의",
     "positive": "🟢 긍정",
 }
 
-# 구글 시트 심각도 → 내부 레벨 매핑
 LEVEL_MAP: dict[str, str] = {
     "🔴경고": "warning",
     "🟡주의": "caution",
@@ -101,11 +155,8 @@ CSV_PATH = Path(__file__).parent / "interactions.csv"
 
 def load_db() -> pd.DataFrame:
     df = None
-
-    # 1) 구글 시트에서 로드 시도
     try:
         raw = pd.read_csv(SHEETS_INTERACTION_URL, dtype=str).fillna("")
-        # Sheet 2 컬럼: 성분A, 성분B, 상호작용유형, 설명, 심각도, 출처
         raw = raw.rename(columns={
             "성분A": "ingredient_a",
             "성분B": "ingredient_b",
@@ -118,7 +169,6 @@ def load_db() -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Google Sheets 로드 실패, 로컬 CSV 사용: {e}")
 
-    # 2) 폴백: 로컬 CSV
     if df is None or df.empty:
         df = pd.read_csv(CSV_PATH, encoding="utf-8-sig", dtype=str).fillna("")
         logger.info(f"로컬 CSV에서 상호작용 DB 로드 완료: {len(df)}건")
@@ -130,38 +180,135 @@ def load_db() -> pd.DataFrame:
     return df
 
 
+# ---------------------------------------------------------------------------
+# 영양성분 DB 로드 (식약처 표준데이터)
+# ---------------------------------------------------------------------------
+NUTRITION_DB_PATH = Path(__file__).parent / "nutrition_db.csv"
+
+def load_nutrition_db() -> pd.DataFrame | None:
+    if not NUTRITION_DB_PATH.exists():
+        logger.warning("nutrition_db.csv 없음 — 제품명 조회 기능 비활성화")
+        return None
+    try:
+        df = pd.read_csv(NUTRITION_DB_PATH, encoding="utf-8-sig", dtype=str).fillna("")
+        df["식품명_lower"] = df["식품명"].str.lower().str.strip()
+        logger.info(f"영양성분 DB 로드 완료: {len(df)}개 제품")
+        return df
+    except Exception as e:
+        logger.warning(f"영양성분 DB 로드 실패: {e}")
+        return None
+
+
 interaction_db: pd.DataFrame = load_db()
+nutrition_db: pd.DataFrame | None = load_nutrition_db()
+
+
+# ---------------------------------------------------------------------------
+# 제품명 → 성분 추출
+# ---------------------------------------------------------------------------
+def _extract_from_row(row: pd.Series) -> list[str]:
+    """DB 행에서 성분 목록 추출."""
+    ingredients: list[str] = []
+
+    # 1) 식품중분류명 기반
+    category = row.get("식품중분류명", "").strip()
+    ing = NUTRI_CATEGORY_MAP.get(category)
+    if ing:
+        ingredients.append(ing)
+
+    # 2) 복합제품은 영양성분 컬럼에서도 추출
+    if "복합" in category:
+        for col, mapped in NUTRI_COL_MAP.items():
+            try:
+                val = float(row.get(col, 0) or 0)
+                if val > 0 and mapped not in ingredients:
+                    ingredients.append(mapped)
+            except (ValueError, TypeError):
+                pass
+
+    return ingredients
+
+
+def lookup_product(name: str) -> tuple[str, list[str]]:
+    """
+    제품명으로 성분 목록 반환.
+    Returns: (matched_name, [ingredient, ...])  — 미발견 시 ('', [])
+    """
+    if nutrition_db is None or nutrition_db.empty:
+        return "", []
+
+    key = name.lower().strip()
+
+    # 1) 완전 일치
+    matches = nutrition_db[nutrition_db["식품명_lower"] == key]
+
+    # 2) 부분 문자열 포함
+    if matches.empty:
+        matches = nutrition_db[nutrition_db["식품명_lower"].str.contains(
+            re.escape(key), na=False
+        )]
+
+    if matches.empty:
+        return "", []
+
+    row = matches.iloc[0]
+    matched_name = row["식품명"]
+    ingredients = _extract_from_row(row)
+    return matched_name, ingredients
 
 
 # ---------------------------------------------------------------------------
 # 유틸 함수
 # ---------------------------------------------------------------------------
 def normalize(name: str) -> str:
-    """소문자 변환 후 별칭 딕셔너리에서 표준 이름으로 변환."""
     key = name.lower().strip()
     return ALIASES.get(key, name.strip())
 
 
-def parse_ingredients(text: str) -> list[str]:
-    """콤마·공백·슬래시 등 구분자로 성분 분리 후 정규화."""
+def parse_ingredients(text: str) -> tuple[list[str], list[str]]:
+    """
+    성분명 또는 제품명 분리 후 정규화.
+    Returns: (ingredients, product_notes)
+    - ingredients: 표준 성분명 목록
+    - product_notes: '제품명 → 성분' 안내 문자열 목록
+    """
     raw = re.split(r"[,，/·\n\t]+", text.strip())
-    seen = set()
-    result = []
+    seen: set[str] = set()
+    ingredients: list[str] = []
+    product_notes: list[str] = []
+
     for token in raw:
         token = token.strip()
         if not token:
             continue
+
+        # 1) ALIASES로 정규화 시도
         norm = normalize(token)
+
+        # 2) 정규화 결과가 원래 값과 같으면(= 매핑 없음) 제품명 조회 시도
+        if norm.lower() == token.lower():
+            matched_name, prod_ings = lookup_product(token)
+            if prod_ings:
+                note = f"📦 {matched_name} → {', '.join(prod_ings)}"
+                product_notes.append(note)
+                for ing in prod_ings:
+                    if ing not in seen:
+                        seen.add(ing)
+                        ingredients.append(ing)
+                continue
+
+        # 3) 정규화된 성분명 추가
         if norm and norm not in seen:
             seen.add(norm)
-            result.append(norm)
-    return result
+            ingredients.append(norm)
+
+    return ingredients, product_notes
 
 
 def check_interactions(ingredients: list[str]) -> dict[str, list[dict]]:
     results: dict[str, list[dict]] = {"warning": [], "caution": [], "positive": []}
 
-    # 1) 동일 성분 중복과잉 체크 (성분A == 성분B인 행)
+    # 동일 성분 중복과잉 체크
     for a in ingredients:
         mask = (interaction_db["ingredient_a"] == a) & (interaction_db["ingredient_b"] == a)
         for _, row in interaction_db[mask].iterrows():
@@ -172,7 +319,7 @@ def check_interactions(ingredients: list[str]) -> dict[str, list[dict]]:
                     "description": row["description"],
                 })
 
-    # 2) 성분 쌍 상호작용 체크
+    # 성분 쌍 상호작용 체크
     for a, b in combinations(ingredients, 2):
         mask = (
             ((interaction_db["ingredient_a"] == a) & (interaction_db["ingredient_b"] == b))
@@ -192,8 +339,18 @@ def check_interactions(ingredients: list[str]) -> dict[str, list[dict]]:
 # ---------------------------------------------------------------------------
 # 카카오 응답 포맷
 # ---------------------------------------------------------------------------
-def build_kakao_response(ingredients: list[str], results: dict) -> dict:
+def build_kakao_response(
+    ingredients: list[str],
+    results: dict,
+    product_notes: list[str] | None = None,
+) -> dict:
     lines: list[str] = []
+
+    if product_notes:
+        for note in product_notes:
+            lines.append(note)
+        lines.append("")
+
     lines.append(f"🔍 분석 성분: {', '.join(ingredients)}\n")
 
     has_any = any(results.values())
@@ -206,7 +363,7 @@ def build_kakao_response(ingredients: list[str], results: dict) -> dict:
         for item in items:
             lines.append(f"  • {item['pair']}")
             lines.append(f"    {item['description']}")
-        lines.append("")  # 빈 줄 구분
+        lines.append("")
 
     if not has_any:
         lines.append("✅ 입력한 성분들 사이에 알려진 상호작용이 없습니다.")
@@ -216,22 +373,12 @@ def build_kakao_response(ingredients: list[str], results: dict) -> dict:
     return {
         "version": "2.0",
         "template": {
-            "outputs": [
-                {"simpleText": {"text": "\n".join(lines)}}
-            ]
+            "outputs": [{"simpleText": {"text": "\n".join(lines)}}]
         },
     }
 
 
-def kakao_simple(text: str) -> dict:
-    return {
-        "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": text}}]},
-    }
-
-
 def kakao_guide() -> dict:
-    """성분 미입력 또는 1개 입력 시 안내 + 버튼 응답."""
     return {
         "version": "2.0",
         "template": {
@@ -239,11 +386,15 @@ def kakao_guide() -> dict:
                 {
                     "basicCard": {
                         "title": "💊 필체크 사용방법",
-                        "description": "복용 중인 영양제 성분을 콤마(,)로 구분해서 입력해주세요!\n\n예) 마그네슘, 칼슘, 비타민D, 오메가3",
+                        "description": (
+                            "복용 중인 영양제 성분명 또는 제품명을 콤마(,)로 구분해서 입력해주세요!\n\n"
+                            "예1) 마그네슘, 칼슘, 비타민D, 오메가3\n"
+                            "예2) 힐리 마그네슘 500, 힐리 비타민D 5000"
+                        ),
                         "buttons": [
                             {
                                 "action": "message",
-                                "label": "예시로 체크해보기",
+                                "label": "성분명으로 체크해보기",
                                 "messageText": "마그네슘, 칼슘, 비타민D, 오메가3",
                             }
                         ],
@@ -259,7 +410,6 @@ def kakao_guide() -> dict:
 # ---------------------------------------------------------------------------
 @app.post("/webhook")
 async def kakao_webhook(request: Request):
-    """카카오 오픈빌더 웹훅 엔드포인트."""
     try:
         body = await request.json()
     except Exception:
@@ -271,45 +421,61 @@ async def kakao_webhook(request: Request):
     if not utterance:
         return JSONResponse(kakao_guide())
 
-    ingredients = parse_ingredients(utterance)
+    ingredients, product_notes = parse_ingredients(utterance)
 
     if len(ingredients) < 2:
         return JSONResponse(kakao_guide())
 
     results = check_interactions(ingredients)
-    return JSONResponse(build_kakao_response(ingredients, results))
+    return JSONResponse(build_kakao_response(ingredients, results, product_notes))
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "db_rows": len(interaction_db), "source": "google_sheets" if len(interaction_db) > 31 else "local_csv"}
+    return {
+        "status": "ok",
+        "interaction_db_rows": len(interaction_db),
+        "nutrition_db_rows": len(nutrition_db) if nutrition_db is not None else 0,
+    }
 
 
 @app.post("/reload")
 def reload_db():
-    """CSV/시트 수정 후 재로드 (서버 재시작 없이)."""
-    global interaction_db
+    global interaction_db, nutrition_db
     interaction_db = load_db()
-    return {"status": "reloaded", "db_rows": len(interaction_db)}
+    nutrition_db = load_nutrition_db()
+    return {
+        "status": "reloaded",
+        "interaction_db_rows": len(interaction_db),
+        "nutrition_db_rows": len(nutrition_db) if nutrition_db is not None else 0,
+    }
 
 
-# ---------------------------------------------------------------------------
-# 로컬 테스트용 직접 호출 엔드포인트
-# ---------------------------------------------------------------------------
 @app.get("/check")
 def check_direct(q: str):
     """
-    브라우저/curl에서 바로 테스트 가능.
+    브라우저/curl에서 바로 테스트.
     예: GET /check?q=마그네슘,칼슘,비타민D
+        GET /check?q=힐리 마그네슘 500,힐리 비타민D 5000
     """
-    ingredients = parse_ingredients(q)
+    ingredients, product_notes = parse_ingredients(q)
     if len(ingredients) < 2:
-        return {"error": "성분을 2개 이상 입력하세요."}
+        return {"error": "성분을 2개 이상 입력하세요.", "ingredients_found": ingredients}
     results = check_interactions(ingredients)
     return {
+        "product_notes": product_notes,
         "ingredients": ingredients,
         "results": results,
     }
+
+
+@app.get("/search_product")
+def search_product(name: str):
+    """제품명으로 성분 조회. 예: GET /search_product?name=힐리 마그네슘 500"""
+    matched, ings = lookup_product(name)
+    if not matched:
+        return {"found": False, "query": name}
+    return {"found": True, "matched_name": matched, "ingredients": ings}
 
 
 # ---------------------------------------------------------------------------
