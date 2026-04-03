@@ -204,6 +204,27 @@ nutrition_db: pd.DataFrame | None = load_nutrition_db()
 
 
 # ---------------------------------------------------------------------------
+# 성분 정보 DB 로드 (ingredient_i0760_map.csv)
+# ---------------------------------------------------------------------------
+INGREDIENT_INFO_PATH = Path(__file__).parent / "ingredient_i0760_map.csv"
+
+def load_ingredient_info() -> pd.DataFrame | None:
+    if not INGREDIENT_INFO_PATH.exists():
+        return None
+    try:
+        df = pd.read_csv(INGREDIENT_INFO_PATH, encoding="utf-8-sig", dtype=str).fillna("")
+        # 성분명 기준으로 중복 제거 (코드가 여러 개인 경우 첫 번째만 유지)
+        df = df.drop_duplicates(subset=["성분명(한)"])
+        logger.info(f"성분 정보 DB 로드 완료: {len(df)}건")
+        return df
+    except Exception as e:
+        logger.warning(f"성분 정보 DB 로드 실패: {e}")
+        return None
+
+ingredient_info_db: pd.DataFrame | None = load_ingredient_info()
+
+
+# ---------------------------------------------------------------------------
 # 제품명 → 성분 추출
 # ---------------------------------------------------------------------------
 def _extract_from_row(row: pd.Series) -> list[str]:
@@ -378,6 +399,72 @@ def build_kakao_response(
     }
 
 
+def get_ingredient_info(name: str) -> dict | None:
+    """성분명으로 정보 조회. 없으면 None 반환."""
+    if ingredient_info_db is None or ingredient_info_db.empty:
+        return None
+    row = ingredient_info_db[ingredient_info_db["성분명(한)"] == name]
+    if row.empty:
+        return None
+    r = row.iloc[0]
+    return {
+        "name_ko": r["성분명(한)"],
+        "name_en": r["성분명(영)"],
+        "category": r["분류"],
+        "upper_limit": r["1일상한섭취량"],
+    }
+
+
+def kakao_ingredient_info(name: str) -> dict:
+    """단일 성분 입력 시 → 성분 정보 + 관련 상호작용 요약 카드."""
+    info = get_ingredient_info(name)
+
+    # 해당 성분 관련 상호작용 가져오기
+    mask = (
+        (interaction_db["ingredient_a"] == name) |
+        (interaction_db["ingredient_b"] == name)
+    )
+    related = interaction_db[mask]
+
+    lines = []
+
+    if info:
+        lines.append(f"💊 {info['name_ko']} ({info['name_en']})")
+        lines.append(f"분류: {info['category']}")
+        upper = info["upper_limit"]
+        if upper and upper != "설정안됨":
+            lines.append(f"⚠️ 1일 상한섭취량: {upper}")
+        else:
+            lines.append("1일 상한섭취량: 별도 기준 없음")
+    else:
+        lines.append(f"💊 {name}")
+
+    if not related.empty:
+        lines.append("")
+        lines.append("📋 주요 상호작용:")
+        for _, row in related.head(5).iterrows():
+            partner = row["ingredient_b"] if row["ingredient_a"] == name else row["ingredient_a"]
+            level = row["level"]
+            emoji = {"warning": "🔴", "caution": "🟡", "positive": "🟢"}.get(level, "•")
+            lines.append(f"  {emoji} {partner}: {row['description'][:30]}…")
+
+    lines.append("")
+    lines.append("2개 이상 성분을 입력하면 상호작용을 체크해드려요!")
+
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [{"simpleText": {"text": "\n".join(lines)}}],
+            "quickReplies": [
+                {"label": "🔍 성분 체크하기", "action": "message",
+                 "messageText": f"{name}, "},
+                {"label": "🏠 처음으로", "action": "message",
+                 "messageText": "처음으로"},
+            ],
+        },
+    }
+
+
 def kakao_guide() -> dict:
     return {
         "version": "2.0",
@@ -423,8 +510,12 @@ async def kakao_webhook(request: Request):
 
     ingredients, product_notes = parse_ingredients(utterance)
 
-    if len(ingredients) < 2:
+    if len(ingredients) == 0:
         return JSONResponse(kakao_guide())
+
+    if len(ingredients) == 1:
+        # 단일 성분 → 성분 정보 카드
+        return JSONResponse(kakao_ingredient_info(ingredients[0]))
 
     results = check_interactions(ingredients)
     return JSONResponse(build_kakao_response(ingredients, results, product_notes))
